@@ -29,11 +29,9 @@ function updateModelLabel(){
 function markdownToHtml(text) {
   if (!text) return '';
 
-  // Store code blocks and inline code in placeholders
   const codeBlocks = [];
   let html = text;
 
-  // --- Code blocks ```
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     const placeholder = `%%CODEBLOCK${codeBlocks.length}%%`;
     codeBlocks.push(
@@ -42,14 +40,12 @@ function markdownToHtml(text) {
     return placeholder;
   });
 
-  // --- Inline code `
   html = html.replace(/`([^`]+)`/g, (_, code) => {
     const placeholder = `%%INLINECODE${codeBlocks.length}%%`;
     codeBlocks.push(`<code>${escapeHtml(code)}</code>`);
     return placeholder;
   });
 
-  // --- Markdown formatting ---
   html = html
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
@@ -63,13 +59,9 @@ function markdownToHtml(text) {
     .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
     .replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
 
-  // --- Wrap consecutive <li> in <ul>
   html = html.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
-
-  // --- Paragraphs (double newline)
   html = html.split(/\n{2,}/).map(p => `<p>${p}</p>`).join('');
 
-  // --- Restore code blocks and inline code
   codeBlocks.forEach((codeHtml, idx) => {
     html = html.replace(`%%CODEBLOCK${idx}%%`, codeHtml);
     html = html.replace(`%%INLINECODE${idx}%%`, codeHtml);
@@ -78,17 +70,125 @@ function markdownToHtml(text) {
   return html;
 }
 
-// ---- Escape helper for code blocks / inline code ----
 const escapeHtml = (str) => {
   return String(str)
-    .replace(/&/g, '&amp;')   // escape &
-    .replace(/</g, '&lt;')    // escape <
-    .replace(/>/g, '&gt;')    // escape >
-    .replace(/"/g, '&quot;')  // escape "
-    .replace(/'/g, '&#39;');  // escape '
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 };
 
 
+// ============================
+// AI Tool Commands
+// ============================
+// The AI can embed commands in its response using the syntax:
+//   <tool:command_name arg1 arg2 ...>optional body</tool>
+//
+// Supported commands:
+//   <tool:create_file filename.txt>file content here</tool>
+//   <tool:open_url https://example.com></tool>
+//   <tool:alert message text here></tool>
+//   <tool:set_title New Chat Title></tool>
+//
+// Commands are stripped from the visible response and executed silently,
+// then the AI gets a follow-up "tool result" message injected into the chat.
+
+const AI_TOOLS = {
+
+  create_file(args, body) {
+    const filename = args[0];
+    if (!filename) return { ok: false, msg: 'No filename provided.' };
+    const content = body || args.slice(1).join(' ');
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+    return { ok: true, msg: `File **${escapeHtml(filename)}** created and downloaded (${content.length} bytes).` };
+  },
+
+  open_url(args) {
+    const url = args[0];
+    if (!url) return { ok: false, msg: 'No URL provided.' };
+    window.open(url, '_blank', 'noopener');
+    return { ok: true, msg: `Opened URL: ${escapeHtml(url)}` };
+  },
+
+  alert(args, body) {
+    const msg = body || args.join(' ');
+    alert(msg);
+    return { ok: true, msg: `Alert shown: "${escapeHtml(msg)}"` };
+  },
+
+  set_title(args, body) {
+    const title = body || args.join(' ');
+    const chat = getActiveChat();
+    if (chat) { chat.title = title; topbarTitle.textContent = title; saveChats(); renderChatList(); }
+    return { ok: true, msg: `Chat title set to **${escapeHtml(title)}**.` };
+  },
+
+};
+
+/**
+ * Parse and execute all <tool:...> commands found in an AI response.
+ * Returns { cleanText, toolResults } where cleanText has the tags stripped
+ * and toolResults is an array of result strings.
+ */
+function processAiTools(text) {
+  const toolResults = [];
+  // Match <tool:name args>body</tool> — body is optional
+  const cleanText = text.replace(/<tool:(\w+)([^>]*)>([\s\S]*?)<\/tool>/gi, (_, name, argsStr, body) => {
+    const args = argsStr.trim().split(/\s+/).filter(Boolean);
+    const fn = AI_TOOLS[name.toLowerCase()];
+    if (!fn) {
+      toolResults.push({ ok: false, name, msg: `Unknown tool: \`${name}\`` });
+      return '';
+    }
+    try {
+      const result = fn(args, body.trim());
+      toolResults.push({ name, ...result });
+    } catch(e) {
+      toolResults.push({ ok: false, name, msg: `Tool \`${name}\` threw: ${e.message}` });
+    }
+    return ''; // strip from visible text
+  });
+
+  // Also support single-line shorthand: @@create_file banana.txt This is the content
+  const cleanText2 = cleanText.replace(/^@@(\w+)\s+(.*)$/gm, (_, name, rest) => {
+    const fn = AI_TOOLS[name.toLowerCase()];
+    if (!fn) {
+      toolResults.push({ ok: false, name, msg: `Unknown tool: \`${name}\`` });
+      return '';
+    }
+    try {
+      // For shorthand, first word = first arg (e.g. filename), rest = body
+      const parts = rest.split(/\s+/);
+      const args = [parts[0]];
+      const body = parts.slice(1).join(' ');
+      const result = fn(args, body);
+      toolResults.push({ name, ...result });
+    } catch(e) {
+      toolResults.push({ ok: false, name, name, msg: `Tool \`${name}\` threw: ${e.message}` });
+    }
+    return '';
+  });
+
+  return { cleanText: cleanText2.trim(), toolResults };
+}
+
+/**
+ * Build a tool-result feedback message to inject into the chat as a system notice.
+ */
+function buildToolFeedbackMessage(toolResults) {
+  if (!toolResults.length) return null;
+  const lines = toolResults.map(r => {
+    const icon = r.ok ? '✅' : '❌';
+    return `${icon} **\`${r.name}\`** — ${r.msg}`;
+  });
+  return `🔧 **Tool results:**\n\n${lines.join('\n')}`;
+}
 
 
 // ============================
@@ -100,7 +200,6 @@ const PROVIDERS = {
   openai: { name: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions' },
   cerebras: { name: 'Cerebras', endpoint: 'https://api.cerebras.ai/v1/chat/completions' }
 };
-const FALLBACK_ENDPOINT = 'https://keycap-ai.onrender.com/generate';
 
 // ============================
 // State
@@ -110,9 +209,22 @@ let state = {
   apiKey: localStorage.getItem('nc_apikey') || '',
   provider: localStorage.getItem('nc_provider') || 'anthropic',
   model: localStorage.getItem('nc_model') || 'claude-sonnet-4-6',
-  systemPrompt: localStorage.getItem('nc_systemprompt') || `You are Corelyn, a usefull AI assistant.
-If user asks to generate code, give a actualy working valid code, no AI slop.
-Respond only in markdown.`,
+  systemPrompt: localStorage.getItem('nc_systemprompt') || `You are Corelyn, a useful AI assistant.
+If user asks to generate code, give actually working valid code, no AI slop.
+Respond only in markdown.
+
+You have access to special tool commands you can embed in your response.
+Use them like this:
+  <tool:create_file filename.txt>file content here</tool>
+  <tool:open_url https://example.com></tool>
+  <tool:alert some message to show></tool>
+  <tool:set_title New conversation title></tool>
+
+Or using shorthand on its own line:
+  @@create_file banana.txt This is the file content
+
+The tool tags are invisible to the user — they get executed automatically.
+Only use tools when the user explicitly asks for file creation, opening URLs, etc.`,
   triggers: JSON.parse(localStorage.getItem('nc_triggers') || '[]'),
   chats: JSON.parse(localStorage.getItem('nc_chats') || '[]'),
   activeChatId: null,
@@ -192,7 +304,14 @@ function loadChat(id) {
   } else {
     welcomeEl.style.display = 'none';
     messagesEl.style.display = 'flex';
-    chat.messages.forEach(msg => renderMessage(msg.role, msg.content));
+    chat.messages.forEach(msg => {
+      // Tool-feedback messages are stored with role 'tool-feedback'
+      if (msg.role === 'tool-feedback') {
+        renderToolFeedback(msg.content);
+      } else {
+        renderMessage(msg.role, msg.content);
+      }
+    });
     attachRunButtons();
   }
   renderChatList();
@@ -247,9 +366,28 @@ async function sendMessage(content) {
   const typingEl = showTyping(); state.streaming = true;
 
   try {
-    const assistantText = await callProvider(chat.messages); typingEl.remove();
-    chat.messages.push({ role: 'assistant', content: assistantText }); saveChats();
-    await renderMessageAsync('assistant', assistantText);
+    // Only pass actual user/assistant messages to the API (not tool-feedback entries)
+    const apiMessages = chat.messages.filter(m => m.role === 'user' || m.role === 'assistant');
+    const rawText = await callProvider(apiMessages);
+    typingEl.remove();
+
+    // Process tool commands embedded in the response
+    const { cleanText, toolResults } = processAiTools(rawText);
+
+    // Store and render the cleaned AI response
+    const displayText = cleanText || rawText;
+    chat.messages.push({ role: 'assistant', content: displayText });
+    saveChats();
+    await renderMessageAsync('assistant', displayText);
+
+    // If any tools fired, inject a feedback message
+    if (toolResults.length) {
+      const feedbackText = buildToolFeedbackMessage(toolResults);
+      chat.messages.push({ role: 'tool-feedback', content: feedbackText });
+      saveChats();
+      await renderToolFeedbackAsync(feedbackText);
+    }
+
   } catch (err) {
     typingEl.remove(); renderError(err.message || 'All providers failed.');
   } finally {
@@ -265,7 +403,6 @@ async function sendMessage(content) {
 async function callProvider(messages) {
   const provider = PROVIDERS[state.provider]; if (!provider) throw new Error("Invalid provider");
 
-  // Build body — Anthropic uses top-level "system", OpenAI/Cerebras use messages array
   let body;
   if (state.provider === 'anthropic') {
     body = { model: state.model, messages, max_tokens: 4096, temperature: 0.7 };
@@ -288,7 +425,6 @@ async function callProvider(messages) {
   }
   const data = await res.json();
 
-  // Anthropic returns content array, others return choices
   if (state.provider === 'anthropic') {
     return data.content?.[0]?.text || "(no response)";
   }
@@ -308,6 +444,41 @@ function renderMessage(role, content) {
     msg.innerHTML = `<div class="message-row"><div class="avatar user">U</div><div class="bubble">${escapeHtml(content)}</div></div>`;
   }
   messagesEl.appendChild(msg);
+  scrollToBottom(true);
+}
+
+/** Render a tool-feedback card (static, no animation needed on history reload) */
+function renderToolFeedback(content) {
+  const el = document.createElement('div');
+  el.className = 'message tool-feedback';
+  el.innerHTML = `
+    <div class="message-row">
+      <div class="avatar tool-fb-avatar">🔧</div>
+      <div class="bubble tool-fb-bubble">${markdownToHtml(content)}</div>
+    </div>`;
+  messagesEl.appendChild(el);
+  scrollToBottom(true);
+}
+
+/** Animated version used after live AI response */
+async function renderToolFeedbackAsync(content) {
+  const el = document.createElement('div');
+  el.className = 'message tool-feedback';
+  // Start collapsed/faded
+  el.style.opacity = '0';
+  el.style.transform = 'translateY(6px)';
+  el.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+  el.innerHTML = `
+    <div class="message-row">
+      <div class="avatar tool-fb-avatar">🔧</div>
+      <div class="bubble tool-fb-bubble">${markdownToHtml(content)}</div>
+    </div>`;
+  messagesEl.appendChild(el);
+  scrollToBottom(true);
+  // Trigger animation
+  await new Promise(r => setTimeout(r, 30));
+  el.style.opacity = '1';
+  el.style.transform = 'translateY(0)';
   scrollToBottom(true);
 }
 
@@ -348,14 +519,39 @@ function checkTriggers(text) {
 
     if (!matched) return;
 
-    // Action is always raw JS. Available vars: response (full text), match (regex match array or [matchStr])
+    // Run the JS action
+    let actionResult = null;
+    let actionError = null;
     try {
       // eslint-disable-next-line no-new-func
-      new Function('response', 'match', trigger.action)(text, matchResult);
-      showToast(`Trigger fired: "${trigger.match}"`);
+      actionResult = new Function('response', 'match', trigger.action)(text, matchResult);
     } catch(e) {
+      actionError = e.message;
       showToast(`Trigger #${idx+1} JS error: ${e.message}`, 'error');
     }
+
+    // Build a feedback message and inject it into the chat
+    const feedbackLines = [];
+    feedbackLines.push(`⚡ **Trigger fired** — matched \`${escapeHtml(trigger.match)}\``);
+    if (trigger.type === 'regex' && matchResult) {
+      feedbackLines.push(`↳ Regex capture: \`${matchResult[0]}\``);
+    }
+    if (actionError) {
+      feedbackLines.push(`❌ Action error: ${escapeHtml(actionError)}`);
+    } else {
+      feedbackLines.push(`✅ Action ran successfully${actionResult !== undefined && actionResult !== null ? ` → \`${String(actionResult).slice(0,80)}\`` : ''}`);
+    }
+    const feedbackText = feedbackLines.join('\n\n');
+
+    // Inject into chat history and render
+    const chat = getActiveChat();
+    if (chat) {
+      chat.messages.push({ role: 'tool-feedback', content: feedbackText });
+      saveChats();
+      renderToolFeedbackAsync(feedbackText);
+    }
+
+    showToast(`Trigger fired: "${trigger.match}"`);
   });
 }
 
@@ -373,10 +569,9 @@ function showToast(msg, type) {
 // ============================
 
 function attachRunButtons() {
-  // Find all <pre><code class="language-js*"> or "language-javascript" blocks
   messagesEl.querySelectorAll('pre code[class*="language-j"]').forEach(codeEl => {
     const pre = codeEl.parentElement;
-    if (pre.querySelector('.run-js-btn')) return; // already attached
+    if (pre.querySelector('.run-js-btn')) return;
 
     const lang = codeEl.className || '';
     if (!lang.match(/language-j(s|avascript)?$/i)) return;
@@ -388,14 +583,12 @@ function attachRunButtons() {
     pre.appendChild(btn);
 
     btn.addEventListener('click', () => {
-      // Remove existing output
       const existing = pre.nextElementSibling;
       if (existing && existing.classList.contains('js-output')) existing.remove();
 
       const code = codeEl.textContent;
       const outputEl = document.createElement('div');
 
-      // Capture console.log output
       const logs = [];
       const origLog = console.log;
       const origWarn = console.warn;
@@ -405,7 +598,6 @@ function attachRunButtons() {
       console.error = (...a) => { logs.push('[error] ' + a.map(String).join(' ')); origError(...a); };
 
       try {
-        // eslint-disable-next-line no-new-func
         const result = new Function(code)();
         console.log = origLog; console.warn = origWarn; console.error = origError;
         const output = [...logs, result !== undefined ? `→ ${String(result)}` : ''].filter(Boolean).join('\n') || '(no output)';
@@ -443,7 +635,6 @@ async function renderMessageAsync(role, content) {
     msg.appendChild(row);
     messagesEl.appendChild(msg);
 
-    // Render progressively — flush HTML every ~8 chars for a streaming feel
     let rendered = '';
     const chunkSize = 6;
     for (let i = 0; i < content.length; i += chunkSize) {
@@ -452,7 +643,6 @@ async function renderMessageAsync(role, content) {
       scrollToBottom(false);
       await new Promise(r => setTimeout(r, 8));
     }
-    // Final full render
     bubble.innerHTML = markdownToHtml(content);
     attachRunButtons();
     checkTriggers(content);
@@ -515,7 +705,6 @@ function setupEventListeners() {
     state.provider = providerSelect.value;
     state.model = modelSelect.value.trim() || state.model;
     state.systemPrompt = systemPromptInput.value;
-    // Collect triggers from DOM
     state.triggers = [];
     triggerListEl.querySelectorAll('.trigger-row').forEach(row => {
       const match = row.querySelector('.trigger-match').value.trim();
@@ -565,7 +754,6 @@ function renderTriggerList() {
       state.triggers.splice(i, 1);
       renderTriggerList();
     };
-    // Tab key inserts spaces in textarea
     row.querySelector('.trigger-action').addEventListener('keydown', e => {
       if (e.key === 'Tab') {
         e.preventDefault();
@@ -578,5 +766,43 @@ function renderTriggerList() {
     triggerListEl.appendChild(row);
   });
 }
+
+// ============================
+// CSS for tool-feedback bubbles (injected once)
+// ============================
+(function injectToolFeedbackStyles() {
+  if (document.getElementById('tool-feedback-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'tool-feedback-styles';
+  style.textContent = `
+    .message.tool-feedback .tool-fb-avatar {
+      background: linear-gradient(135deg, #2a2a3a, #3a3a50);
+      border: 1px solid #555;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .message.tool-feedback .tool-fb-bubble {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      border: 1px solid #334;
+      color: #aac4e0;
+      font-size: 13px;
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+    .message.tool-feedback .tool-fb-bubble strong {
+      color: #7eb8f7;
+    }
+    .message.tool-feedback .tool-fb-bubble code {
+      background: #0d1117;
+      color: #79c0ff;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+  `;
+  document.head.appendChild(style);
+})();
 
 init();
