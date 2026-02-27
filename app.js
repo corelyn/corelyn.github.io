@@ -85,12 +85,12 @@ function markdownToHtml(text) {
 }
 
 // ---- HTML escape helper ----
-function escapeHtml(str) {
-  return str.replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-}
 
+const escapeHtml = (str) => {
+                const div = document.createElement('div');
+                div.textContent = str;
+                return div.innerHTML;
+};
 
 
 // ============================
@@ -582,3 +582,4 @@ function renderTriggerList() {
 }
 
 init();
+
