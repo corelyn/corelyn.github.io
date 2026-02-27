@@ -1,6 +1,98 @@
 // ============================
-// NeuralChat — app.js (Multi-Provider + Settings Modal)
+// Helpers
 // ============================
+
+function scrollToBottom(smooth){
+  const container = document.querySelector('.messages-container');
+  if(smooth) container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+  else container.scrollTop = container.scrollHeight;
+}
+
+function autoResize(){
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+}
+
+function updateChatTitle(chat, content){
+  if(chat.title === 'New Chat'){
+    chat.title = content.slice(0, 40);
+    topbarTitle.textContent = chat.title;
+  }
+}
+
+function updateModelLabel(){
+  modelLabel.textContent = `${state.provider} • ${state.model}`;
+}
+
+// ============================
+// ---- Markdown parser (safe for code blocks) ----
+function markdownToHtml(text) {
+  let html = escapeHtml(text);
+
+  // Store code blocks and inline code in placeholders
+  const codeBlocks = [];
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const placeholder = `%%CODEBLOCK${codeBlocks.length}%%`;
+    codeBlocks.push(`<pre><code class="language-${lang}">${escapeHtml(code.trim())}</code></pre>`);
+    return placeholder;
+  });
+
+  html = html.replace(/`([^`]+)`/g, (_, code) => {
+    const placeholder = `%%INLINECODE${codeBlocks.length}%%`;
+    codeBlocks.push(`<code>${escapeHtml(code)}</code>`);
+    return placeholder;
+  });
+
+  // Apply formatting to everything else
+  html = html
+    // Bold
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    // Italic
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
+    // Headings
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    // Blockquote
+    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+    // Horizontal rule
+    .replace(/^---$/gm, '<hr>')
+    // Unordered lists
+    .replace(/^[\-\*] (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+    // Ordered lists
+    .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+    // Paragraphs (double newline)
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/\n/g, '<br>');
+
+  html = '<p>' + html + '</p>';
+
+  // Clean up empty paragraphs
+  html = html.replace(/<p>\s*<\/p>/g, '');
+  html = html.replace(/<p>(<(?:pre|h[1-6]|ul|ol|blockquote|hr))/g, '$1');
+  html = html.replace(/(<\/(?:pre|h[1-6]|ul|ol|blockquote)>)<\/p>/g, '$1');
+
+  // Restore code blocks and inline code
+  codeBlocks.forEach((codeHtml, index) => {
+    html = html.replace(`%%CODEBLOCK${index}%%`, codeHtml);
+    html = html.replace(`%%INLINECODE${index}%%`, codeHtml);
+  });
+
+  return html;
+}
+
+// ---- HTML escape helper ----
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 
 // ============================
 // Providers
@@ -153,37 +245,20 @@ async function sendMessage(content) {
     const assistantText = await callProvider(chat.messages); typingEl.remove();
     chat.messages.push({ role: 'assistant', content: assistantText }); saveChats(); renderMessage('assistant', assistantText);
   } catch (err) {
-    console.warn("Primary failed:", err);
-    try {
-      const fallback = await callFallback(content); typingEl.remove();
-      chat.messages.push({ role: 'assistant', content: fallback.response }); saveChats(); renderMessage('assistant', fallback.response);
-    } catch (fallbackErr) {
-      typingEl.remove(); renderError(fallbackErr.message || 'All providers failed.');
-    }
+    typingEl.remove(); renderError(err.message || 'All providers failed.');
   }
-  state.streaming = false;
 }
 
 // ============================
-// Provider & Fallback
+// Provider Calls
 // ============================
 
 async function callProvider(messages) {
   const provider = PROVIDERS[state.provider]; if (!provider) throw new Error("Invalid provider");
-
-  if (state.provider === 'anthropic') {
-    const res = await fetch(provider.endpoint, { method: 'POST', headers: { 'Content-Type':'application/json', 'x-api-key':state.apiKey, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' }, body: JSON.stringify({ model: state.model, max_tokens: 4096, messages: messages.map(m=>({role:m.role,content:m.content})) }) });
-    if (!res.ok) throw new Error("Anthropic error"); const data = await res.json(); return data.content?.[0]?.text || "(no response)";
-  }
-
   const res = await fetch(provider.endpoint, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${state.apiKey}`}, body:JSON.stringify({ model: state.model, messages: messages, temperature:0.7 }) });
-  if (!res.ok) throw new Error("Provider error"); const data = await res.json(); return data.choices?.[0]?.message?.content || "(no response)";
-}
-
-async function callFallback(message) {
-  const res = await fetch(FALLBACK_ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ prompt:message, model:'gpt-3.5-turbo' }) });
-  const data = await res.json();
-  if (data.response) return { response: data.response }; if (data.error) throw new Error(data.error); throw new Error("Fallback failed");
+  if (!res.ok) throw new Error("Provider error"); 
+  const data = await res.json(); 
+  return data.choices?.[0]?.message?.content || "(no response)";
 }
 
 // ============================
@@ -191,9 +266,15 @@ async function callFallback(message) {
 // ============================
 
 function renderMessage(role, content) {
-  const msg = document.createElement('div'); msg.className = `message ${role}`;
-  msg.innerHTML = `<div class="message-row"><div class="avatar ${role}">${role==='user'?'U':'✦'}</div><div class="bubble">${escapeHtml(content)}</div></div>`;
-  messagesEl.appendChild(msg); scrollToBottom(true);
+  const msg = document.createElement('div');
+  msg.className = `message ${role}`;
+  if(role === 'assistant') {
+    msg.innerHTML = `<div class="message-row"><div class="avatar assistant">✦</div><div class="bubble">${markdownToHtml(content)}</div></div>`;
+  } else {
+    msg.innerHTML = `<div class="message-row"><div class="avatar user">U</div><div class="bubble">${escapeHtml(content)}</div></div>`;
+  }
+  messagesEl.appendChild(msg);
+  scrollToBottom(true);
 }
 
 function showTyping() {
@@ -207,12 +288,6 @@ function renderError(text) {
   msg.innerHTML = `<div class="message-row"><div class="avatar assistant" style="color:red;">!</div><div class="bubble" style="color:red;">${escapeHtml(text)}</div></div>`;
   messagesEl.appendChild(msg);
 }
-
-function escapeHtml(str) { return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-function scrollToBottom(smooth){ const container = document.querySelector('.messages-container'); container.scrollTop = container.scrollHeight; }
-function autoResize(){ inputEl.style.height='auto'; inputEl.style.height=Math.min(inputEl.scrollHeight,200)+'px'; }
-function updateChatTitle(chat,content){ if(chat.title==='New Chat'){ chat.title=content.slice(0,40); topbarTitle.textContent=chat.title; } }
-function updateModelLabel(){ modelLabel.textContent=`${state.provider} • ${state.model}`; }
 
 // ============================
 // Events
@@ -229,8 +304,8 @@ function setupEventListeners() {
   modelSelector.addEventListener('click', e=>{ e.stopPropagation(); modelDropdown.classList.toggle('open'); });
   document.querySelectorAll('.model-option').forEach(opt => {
     opt.addEventListener('click', () => {
-      state.provider = opt.dataset.provider;
-      state.model = opt.dataset.model;
+      state.provider = opt.dataset.provider || state.provider;
+      state.model = opt.dataset.model || state.model;
       updateModelLabel();
       document.querySelectorAll('.model-option').forEach(o=>o.classList.remove('active'));
       opt.classList.add('active');
