@@ -27,70 +27,68 @@ function updateModelLabel(){
 // ============================
 // ---- Markdown parser (safe for code blocks) ----
 function markdownToHtml(text) {
-  let html = escapeHtml(text);
+  if (!text) return '';
 
   // Store code blocks and inline code in placeholders
   const codeBlocks = [];
+  let html = text;
+
+  // --- Code blocks ```
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     const placeholder = `%%CODEBLOCK${codeBlocks.length}%%`;
-    codeBlocks.push(`<pre><code class="language-${lang}">${escapeHtml(code.trim())}</code></pre>`);
+    codeBlocks.push(
+      `<pre><code class="language-${lang}">${escapeHtml(code.trim())}</code></pre>`
+    );
     return placeholder;
   });
 
+  // --- Inline code `
   html = html.replace(/`([^`]+)`/g, (_, code) => {
     const placeholder = `%%INLINECODE${codeBlocks.length}%%`;
     codeBlocks.push(`<code>${escapeHtml(code)}</code>`);
     return placeholder;
   });
 
-  // Apply formatting to everything else
+  // --- Markdown formatting ---
   html = html
-    // Bold
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/__(.+?)__/g, '<strong>$1</strong>')
-    // Italic
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/_(.+?)_/g, '<em>$1</em>')
-    // Headings
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    // Blockquote
-    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
-    // Horizontal rule
+    .replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
     .replace(/^---$/gm, '<hr>')
-    // Unordered lists
-    .replace(/^[\-\*] (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
-    // Ordered lists
     .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
-    // Paragraphs (double newline)
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>');
+    .replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
 
-  html = '<p>' + html + '</p>';
+  // --- Wrap consecutive <li> in <ul>
+  html = html.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
 
-  // Clean up empty paragraphs
-  html = html.replace(/<p>\s*<\/p>/g, '');
-  html = html.replace(/<p>(<(?:pre|h[1-6]|ul|ol|blockquote|hr))/g, '$1');
-  html = html.replace(/(<\/(?:pre|h[1-6]|ul|ol|blockquote)>)<\/p>/g, '$1');
+  // --- Paragraphs (double newline)
+  html = html.split(/\n{2,}/).map(p => `<p>${p}</p>`).join('');
 
-  // Restore code blocks and inline code
-  codeBlocks.forEach((codeHtml, index) => {
-    html = html.replace(`%%CODEBLOCK${index}%%`, codeHtml);
-    html = html.replace(`%%INLINECODE${index}%%`, codeHtml);
+  // --- Restore code blocks and inline code
+  codeBlocks.forEach((codeHtml, idx) => {
+    html = html.replace(`%%CODEBLOCK${idx}%%`, codeHtml);
+    html = html.replace(`%%INLINECODE${idx}%%`, codeHtml);
   });
 
   return html;
 }
 
-// ---- HTML escape helper ----
-
+// ---- Escape helper for code blocks / inline code ----
 const escapeHtml = (str) => {
-                const div = document.createElement('div');
-                div.textContent = str;
-                return div.innerHTML;
+  return String(str)
+    .replace(/&/g, '&amp;')   // escape &
+    .replace(/</g, '&lt;')    // escape <
+    .replace(/>/g, '&gt;')    // escape >
+    .replace(/"/g, '&quot;')  // escape "
+    .replace(/'/g, '&#39;');  // escape '
 };
+
+
 
 
 // ============================
@@ -582,4 +580,3 @@ function renderTriggerList() {
 }
 
 init();
-
