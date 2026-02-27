@@ -113,7 +113,9 @@ let state = {
   apiKey: localStorage.getItem('nc_apikey') || '',
   provider: localStorage.getItem('nc_provider') || 'anthropic',
   model: localStorage.getItem('nc_model') || 'claude-sonnet-4-6',
-  systemPrompt: localStorage.getItem('nc_systemprompt') || '',
+  systemPrompt: localStorage.getItem('nc_systemprompt') || `You are Corelyn, a usefull AI assistant.
+If user asks to generate code, give a actualy working valid code, no AI slop.
+Respond only in markdown.`,
   triggers: JSON.parse(localStorage.getItem('nc_triggers') || '[]'),
   chats: JSON.parse(localStorage.getItem('nc_chats') || '[]'),
   activeChatId: null,
