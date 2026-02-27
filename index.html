@@ -121,6 +121,18 @@
           <label for="modelSelect">Default Model</label>
           <input type="text" id="modelSelect" placeholder="Model name">
         </div>
+        <div class="setting-item">
+          <label for="systemPromptInput">System Prompt</label>
+          <textarea id="systemPromptInput" placeholder="You are a helpful assistant..." rows="4" style="resize:vertical;"></textarea>
+        </div>
+        <div class="setting-item">
+          <label>
+            Triggers
+            <span class="label-hint">(fire actions when AI response matches)</span>
+          </label>
+          <div id="triggerList" class="trigger-list"></div>
+          <button id="addTriggerBtn" class="add-trigger-btn">+ Add Trigger</button>
+        </div>
       </div>
       <div class="modal-footer">
         <button id="saveSettingsBtn">Save</button>

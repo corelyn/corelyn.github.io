@@ -113,6 +113,8 @@ let state = {
   apiKey: localStorage.getItem('nc_apikey') || '',
   provider: localStorage.getItem('nc_provider') || 'anthropic',
   model: localStorage.getItem('nc_model') || 'claude-sonnet-4-6',
+  systemPrompt: localStorage.getItem('nc_systemprompt') || '',
+  triggers: JSON.parse(localStorage.getItem('nc_triggers') || '[]'),
   chats: JSON.parse(localStorage.getItem('nc_chats') || '[]'),
   activeChatId: null,
   streaming: false,
@@ -143,6 +145,9 @@ const saveSettingsBtn = $('saveSettingsBtn');
 const apiKeyInput = $('apiKeyInput');
 const providerSelect = $('providerSelect');
 const modelSelect = $('modelSelect');
+const systemPromptInput = $('systemPromptInput');
+const triggerListEl = $('triggerList');
+const addTriggerBtn = $('addTriggerBtn');
 
 // ============================
 // Init
@@ -189,6 +194,7 @@ function loadChat(id) {
     welcomeEl.style.display = 'none';
     messagesEl.style.display = 'flex';
     chat.messages.forEach(msg => renderMessage(msg.role, msg.content));
+    attachRunButtons();
   }
   renderChatList();
   scrollToBottom(true);
@@ -237,15 +243,19 @@ async function sendMessage(content) {
 
   welcomeEl.style.display = 'none'; messagesEl.style.display = 'flex';
 
-  chat.messages.push({ role: 'user', content }); renderMessage('user', content); updateChatTitle(chat, content); saveChats();
+  chat.messages.push({ role: 'user', content }); await renderMessageAsync('user', content); updateChatTitle(chat, content); saveChats();
   inputEl.value = ''; autoResize(); sendBtn.disabled = true;
   const typingEl = showTyping(); state.streaming = true;
 
   try {
     const assistantText = await callProvider(chat.messages); typingEl.remove();
-    chat.messages.push({ role: 'assistant', content: assistantText }); saveChats(); renderMessage('assistant', assistantText);
+    chat.messages.push({ role: 'assistant', content: assistantText }); saveChats();
+    await renderMessageAsync('assistant', assistantText);
   } catch (err) {
     typingEl.remove(); renderError(err.message || 'All providers failed.');
+  } finally {
+    state.streaming = false;
+    sendBtn.disabled = !inputEl.value.trim();
   }
 }
 
@@ -255,9 +265,34 @@ async function sendMessage(content) {
 
 async function callProvider(messages) {
   const provider = PROVIDERS[state.provider]; if (!provider) throw new Error("Invalid provider");
-  const res = await fetch(provider.endpoint, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${state.apiKey}`}, body:JSON.stringify({ model: state.model, messages: messages, temperature:0.7 }) });
-  if (!res.ok) throw new Error("Provider error"); 
-  const data = await res.json(); 
+
+  // Build body — Anthropic uses top-level "system", OpenAI/Cerebras use messages array
+  let body;
+  if (state.provider === 'anthropic') {
+    body = { model: state.model, messages, max_tokens: 4096, temperature: 0.7 };
+    if (state.systemPrompt) body.system = state.systemPrompt;
+  } else {
+    const msgs = state.systemPrompt
+      ? [{ role: 'system', content: state.systemPrompt }, ...messages]
+      : messages;
+    body = { model: state.model, messages: msgs, temperature: 0.7 };
+  }
+
+  const res = await fetch(provider.endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData?.error?.message || `Provider error: ${res.status}`);
+  }
+  const data = await res.json();
+
+  // Anthropic returns content array, others return choices
+  if (state.provider === 'anthropic') {
+    return data.content?.[0]?.text || "(no response)";
+  }
   return data.choices?.[0]?.message?.content || "(no response)";
 }
 
@@ -287,6 +322,146 @@ function renderError(text) {
   const msg = document.createElement('div'); msg.className = 'message assistant';
   msg.innerHTML = `<div class="message-row"><div class="avatar assistant" style="color:red;">!</div><div class="bubble" style="color:red;">${escapeHtml(text)}</div></div>`;
   messagesEl.appendChild(msg);
+}
+
+// ============================
+// Trigger Engine
+// ============================
+
+function checkTriggers(text) {
+  state.triggers.forEach((trigger, idx) => {
+    if (!trigger.match || !trigger.action) return;
+    let matched = false;
+    let matchResult = null;
+    try {
+      if (trigger.type === 'regex') {
+        const re = new RegExp(trigger.match, 'i');
+        matchResult = text.match(re);
+        matched = !!matchResult;
+      } else {
+        matched = text.toLowerCase().includes(trigger.match.toLowerCase());
+        matchResult = matched ? [trigger.match] : null;
+      }
+    } catch(e) {
+      showToast(`Trigger #${idx+1} match error: ${e.message}`, 'error');
+      return;
+    }
+
+    if (!matched) return;
+
+    // Action is always raw JS. Available vars: response (full text), match (regex match array or [matchStr])
+    try {
+      // eslint-disable-next-line no-new-func
+      new Function('response', 'match', trigger.action)(text, matchResult);
+      showToast(`Trigger fired: "${trigger.match}"`);
+    } catch(e) {
+      showToast(`Trigger #${idx+1} JS error: ${e.message}`, 'error');
+    }
+  });
+}
+
+function showToast(msg, type) {
+  const toast = document.createElement('div');
+  toast.className = 'trigger-toast' + (type === 'error' ? ' trigger-toast-error' : '');
+  const icon = type === 'error' ? '⚠️' : '⚡';
+  toast.innerHTML = `<span class="trigger-toast-icon">${icon}</span><span>${escapeHtml(msg)}</span>`;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3500);
+}
+
+// ============================
+// JS Code Runner
+// ============================
+
+function attachRunButtons() {
+  // Find all <pre><code class="language-js*"> or "language-javascript" blocks
+  messagesEl.querySelectorAll('pre code[class*="language-j"]').forEach(codeEl => {
+    const pre = codeEl.parentElement;
+    if (pre.querySelector('.run-js-btn')) return; // already attached
+
+    const lang = codeEl.className || '';
+    if (!lang.match(/language-j(s|avascript)?$/i)) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'run-js-btn';
+    btn.textContent = '▶ Run';
+    pre.style.position = 'relative';
+    pre.appendChild(btn);
+
+    btn.addEventListener('click', () => {
+      // Remove existing output
+      const existing = pre.nextElementSibling;
+      if (existing && existing.classList.contains('js-output')) existing.remove();
+
+      const code = codeEl.textContent;
+      const outputEl = document.createElement('div');
+
+      // Capture console.log output
+      const logs = [];
+      const origLog = console.log;
+      const origWarn = console.warn;
+      const origError = console.error;
+      console.log = (...a) => { logs.push(a.map(String).join(' ')); origLog(...a); };
+      console.warn = (...a) => { logs.push('[warn] ' + a.map(String).join(' ')); origWarn(...a); };
+      console.error = (...a) => { logs.push('[error] ' + a.map(String).join(' ')); origError(...a); };
+
+      try {
+        // eslint-disable-next-line no-new-func
+        const result = new Function(code)();
+        console.log = origLog; console.warn = origWarn; console.error = origError;
+        const output = [...logs, result !== undefined ? `→ ${String(result)}` : ''].filter(Boolean).join('\n') || '(no output)';
+        outputEl.className = 'js-output success';
+        outputEl.textContent = output;
+      } catch(e) {
+        console.log = origLog; console.warn = origWarn; console.error = origError;
+        outputEl.className = 'js-output error';
+        outputEl.textContent = `Error: ${e.message}`;
+      }
+
+      pre.insertAdjacentElement('afterend', outputEl);
+    });
+  });
+}
+
+// ============================
+// Async character-by-character rendering
+// ============================
+
+async function renderMessageAsync(role, content) {
+  const msg = document.createElement('div');
+  msg.className = `message ${role}`;
+
+  if (role === 'assistant') {
+    const row = document.createElement('div');
+    row.className = 'message-row';
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar assistant';
+    avatar.textContent = '✦';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    msg.appendChild(row);
+    messagesEl.appendChild(msg);
+
+    // Render progressively — flush HTML every ~8 chars for a streaming feel
+    let rendered = '';
+    const chunkSize = 6;
+    for (let i = 0; i < content.length; i += chunkSize) {
+      rendered += content.slice(i, i + chunkSize);
+      bubble.innerHTML = markdownToHtml(rendered);
+      scrollToBottom(false);
+      await new Promise(r => setTimeout(r, 8));
+    }
+    // Final full render
+    bubble.innerHTML = markdownToHtml(content);
+    attachRunButtons();
+    checkTriggers(content);
+  } else {
+    msg.innerHTML = `<div class="message-row"><div class="avatar user">U</div><div class="bubble">${escapeHtml(content)}</div></div>`;
+    messagesEl.appendChild(msg);
+  }
+  scrollToBottom(true);
 }
 
 // ============================
@@ -322,18 +497,87 @@ function setupEventListeners() {
   });
 
   // Settings modal
-  openSettingsBtn.onclick=()=>{ apiKeyInput.value=state.apiKey; providerSelect.value=state.provider; modelSelect.value=state.model; settingsModal.style.display = 'flex'; };
+  openSettingsBtn.onclick=()=>{
+    apiKeyInput.value=state.apiKey;
+    providerSelect.value=state.provider;
+    modelSelect.value=state.model;
+    systemPromptInput.value=state.systemPrompt;
+    renderTriggerList();
+    settingsModal.style.display = 'flex';
+  };
   closeSettingsBtn.onclick=()=>{ settingsModal.style.display='none'; };
   window.onclick = e => { if(e.target===settingsModal) settingsModal.style.display='none'; };
+  addTriggerBtn.onclick = () => {
+    state.triggers.push({ match: '', type: 'contains', action: '' });
+    renderTriggerList();
+  };
   saveSettingsBtn.onclick=()=>{
     state.apiKey = apiKeyInput.value.trim();
     state.provider = providerSelect.value;
     state.model = modelSelect.value.trim() || state.model;
+    state.systemPrompt = systemPromptInput.value;
+    // Collect triggers from DOM
+    state.triggers = [];
+    triggerListEl.querySelectorAll('.trigger-row').forEach(row => {
+      const match = row.querySelector('.trigger-match').value.trim();
+      const type = row.querySelector('.trigger-type').value;
+      const action = row.querySelector('.trigger-action').value.trim();
+      if (match) state.triggers.push({ match, type, action });
+    });
     localStorage.setItem('nc_apikey', state.apiKey);
     localStorage.setItem('nc_provider', state.provider);
     localStorage.setItem('nc_model', state.model);
-    updateModelLabel(); settingsModal.style.display='none'; alert('Settings saved!');
+    localStorage.setItem('nc_systemprompt', state.systemPrompt);
+    localStorage.setItem('nc_triggers', JSON.stringify(state.triggers));
+    updateModelLabel(); settingsModal.style.display='none';
+    showToast('✓ Settings saved');
   };
+}
+
+// ============================
+// Trigger List UI
+// ============================
+
+function renderTriggerList() {
+  triggerListEl.innerHTML = '';
+  if (state.triggers.length === 0) {
+    triggerListEl.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 2px;">No triggers yet. Add one below — the action runs as JavaScript when the AI response matches.</div>';
+    return;
+  }
+  state.triggers.forEach((t, i) => {
+    const row = document.createElement('div');
+    row.className = 'trigger-row trigger-row-vertical';
+    const defaultAction = t.action || '// Variables: response (full text), match (array)\n// Examples:\n// alert("AI said: " + match[0])\n// fetch("https://your-webhook.com", { method:"POST", body: response })';
+    row.innerHTML = `
+      <div class="trigger-row-top">
+        <select class="trigger-type">
+          <option value="contains" ${t.type==='contains'?'selected':''}>contains</option>
+          <option value="regex" ${t.type==='regex'?'selected':''}>regex</option>
+        </select>
+        <input class="trigger-match" type="text" placeholder="match text or pattern…" value="${escapeHtml(t.match)}">
+        <button class="trigger-del-btn" data-i="${i}" title="Delete trigger">×</button>
+      </div>
+      <div class="trigger-row-bottom">
+        <span class="trigger-js-label">JS</span>
+        <textarea class="trigger-action" rows="4" spellcheck="false" placeholder="// JS to run. Variables: response, match">${escapeHtml(defaultAction)}</textarea>
+      </div>
+    `;
+    row.querySelector('.trigger-del-btn').onclick = () => {
+      state.triggers.splice(i, 1);
+      renderTriggerList();
+    };
+    // Tab key inserts spaces in textarea
+    row.querySelector('.trigger-action').addEventListener('keydown', e => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const ta = e.target;
+        const s = ta.selectionStart, end = ta.selectionEnd;
+        ta.value = ta.value.substring(0, s) + '  ' + ta.value.substring(end);
+        ta.selectionStart = ta.selectionEnd = s + 2;
+      }
+    });
+    triggerListEl.appendChild(row);
+  });
 }
 
 init();
